@@ -4,7 +4,7 @@ import json
 import pdfplumber
 from pathlib import Path
 
-N8N_BASE_URL = "http://localhost:5678/webhook"
+N8N_BASE_URL = "n8n-production-1cf5.up.railway.app"
 MAX_QUESTIONS = 5
 
 st.set_page_config(page_title="AI Interview Simulator", page_icon="🎤", layout="wide")
