@@ -1,22 +1,47 @@
 import streamlit as st
 import requests
 import pdfplumber
-from elevenlabs.client import ElevenLabs
 import base64
-import sounddevice as sd
-import soundfile as sf
-import numpy as np
-import tempfile
-import os
-import whisper
 import json
-from database import (
-    get_or_create_user, create_session, complete_session,
-    save_qa, save_final_scores, get_user_history, get_session_qa
-)
+import os
+import platform
+
+# Cloud detection
+IS_CLOUD = os.environ.get("STREAMLIT_SHARING_MODE") is not None or \
+           "streamlit" in os.environ.get("HOME", "").lower() or \
+           os.environ.get("IS_CLOUD", "false").lower() == "true"
+
+# Only import voice libs if running locally
+if not IS_CLOUD:
+    try:
+        import sounddevice as sd
+        import soundfile as sf
+        import numpy as np
+        import tempfile
+        import whisper
+        VOICE_INPUT_AVAILABLE = True
+    except ImportError:
+        VOICE_INPUT_AVAILABLE = False
+else:
+    VOICE_INPUT_AVAILABLE = False
+
+try:
+    from elevenlabs.client import ElevenLabs
+    VOICE_OUTPUT_AVAILABLE = True
+except ImportError:
+    VOICE_OUTPUT_AVAILABLE = False
+
+try:
+    from database import (
+        get_or_create_user, create_session, complete_session,
+        save_qa, save_final_scores, get_user_history, get_session_qa
+    )
+    DB_AVAILABLE = True
+except ImportError:
+    DB_AVAILABLE = False
 
 # ── Configuration ───────────────────────────────────────
-N8N_BASE_URL = "https://n8n-production-1cf5.up.railway.app/webhook"
+N8N_BASE_URL = st.secrets.get("N8N_BASE_URL", "https://n8n-production-1cf5.up.railway.app/webhook")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MAX_QUESTIONS = 5
 
@@ -48,14 +73,19 @@ for key, val in {
 if not st.session_state.user_id:
     st.title("🎤 AI Interview Simulator")
     st.subheader("Enter your details to begin")
+
     col1, col2 = st.columns(2)
     with col1:
         name = st.text_input("Your Name")
     with col2:
         email = st.text_input("Your Email")
+
     if st.button("Continue →", type="primary"):
         if name and email:
-            user_id = get_or_create_user(name, email)
+            if DB_AVAILABLE:
+                user_id = get_or_create_user(name, email)
+            else:
+                user_id = f"user_{name.lower().replace(' ', '_')}"
             if user_id:
                 st.session_state.user_id = user_id
                 st.session_state.user_name = name
@@ -68,6 +98,8 @@ if not st.session_state.user_id:
 # VOICE OUTPUT — ElevenLabs TTS
 # ════════════════════════════════════════════════════════
 def speak_question(text: str):
+    if not VOICE_OUTPUT_AVAILABLE:
+        return
     try:
         client = ElevenLabs(
             api_key=st.secrets.get("ELEVENLABS_KEY", "")
@@ -94,36 +126,32 @@ def display_audio():
         )
 
 # ════════════════════════════════════════════════════════
-# VOICE INPUT — Whisper STT
+# VOICE INPUT — Whisper STT (local only)
 # ════════════════════════════════════════════════════════
-@st.cache_resource
-def load_whisper_model():
-    return whisper.load_model("base")
+if VOICE_INPUT_AVAILABLE:
+    @st.cache_resource
+    def load_whisper_model():
+        return whisper.load_model("base")
 
-def record_answer(duration: int = 10) -> str:
-    try:
-        model = load_whisper_model()
-        sample_rate = 16000
-
-        recording = sd.rec(
-            int(duration * sample_rate),
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32"
-        )
-        sd.wait()
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            temp_path = f.name
-        sf.write(temp_path, recording, sample_rate)
-
-        result = model.transcribe(temp_path, language="en", fp16=False)
-        os.unlink(temp_path)
-
-        return result["text"].strip()
-
-    except Exception as e:
-        return f"❌ Recording error: {str(e)}"
+    def record_answer(duration: int = 10) -> str:
+        try:
+            model = load_whisper_model()
+            sample_rate = 16000
+            recording = sd.rec(
+                int(duration * sample_rate),
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32"
+            )
+            sd.wait()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                temp_path = f.name
+            sf.write(temp_path, recording, sample_rate)
+            result = model.transcribe(temp_path, language="en", fp16=False)
+            os.unlink(temp_path)
+            return result["text"].strip()
+        except Exception as e:
+            return f"❌ Recording error: {str(e)}"
 
 # ════════════════════════════════════════════════════════
 # EMOTION ANALYSIS — Groq LLM
@@ -141,7 +169,7 @@ def analyse_emotion(answer_text: str) -> dict:
                 },
                 {
                     "role": "user",
-                    "content": f"Analyse this interview answer for emotional signals and communication style: {answer_text}"
+                    "content": f"Analyse this interview answer for emotional signals: {answer_text}"
                 }
             ]
         }
@@ -157,7 +185,7 @@ def analyse_emotion(answer_text: str) -> dict:
         raw = r.json()["choices"][0]["message"]["content"].strip()
         cleaned = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(cleaned)
-    except Exception as e:
+    except Exception:
         return {
             "emotion": "neutral",
             "energy": 5,
@@ -192,6 +220,9 @@ with st.sidebar:
             st.write(st.session_state.resume_text[:500] + "...")
 
     voice_enabled = st.toggle("🔊 Voice Output", value=True)
+
+    if IS_CLOUD:
+        st.info("🌐 Running on cloud — voice input available in local version")
 
     if st.button("🔄 Reset Interview"):
         for key in ["started", "history", "finished",
@@ -269,7 +300,6 @@ def process_answer(user_input: str):
             score = get_score(last_q, user_input)
             emotion_data = analyse_emotion(user_input)
 
-        # Merge emotion into score
         score["emotion"] = emotion_data.get("emotion", "neutral")
         score["energy"] = emotion_data.get("energy", 5)
         score["nervousness"] = emotion_data.get("nervousness", 5)
@@ -277,17 +307,18 @@ def process_answer(user_input: str):
 
         st.session_state.scores.append(score)
 
-        save_qa(
-            session_id=st.session_state.session_id,
-            question_number=st.session_state.q_count,
-            question=last_q,
-            answer=user_input,
-            clarity=score["clarity"],
-            confidence=score["confidence"],
-            relevance=score["relevance"],
-            feedback=score["feedback"],
-            emotion=score["emotion"]
-        )
+        if DB_AVAILABLE and st.session_state.session_id:
+            save_qa(
+                session_id=st.session_state.session_id,
+                question_number=st.session_state.q_count,
+                question=last_q,
+                answer=user_input,
+                clarity=score["clarity"],
+                confidence=score["confidence"],
+                relevance=score["relevance"],
+                feedback=score["feedback"],
+                emotion=score["emotion"]
+            )
 
     if st.session_state.q_count >= MAX_QUESTIONS:
         st.session_state.finished = True
@@ -296,7 +327,7 @@ def process_answer(user_input: str):
     with st.spinner("Interviewer is thinking..."):
         next_q = get_next_question(user_input)
         if "interview is now complete" not in next_q.lower():
-            if voice_enabled:
+            if voice_enabled and VOICE_OUTPUT_AVAILABLE:
                 speak_question(next_q)
 
     if "interview is now complete" in next_q.lower():
@@ -329,19 +360,21 @@ with tab1:
 
         display_audio()
 
+        # Screen 1: Not started
         if not st.session_state.started:
             st.info("Configure your interview in the sidebar, then click Start.")
             if st.button("🚀 Start Interview", type="primary"):
-                session_id = create_session(
-                    st.session_state.user_id,
-                    industry,
-                    difficulty
-                )
-                st.session_state.session_id = session_id
+                if DB_AVAILABLE:
+                    session_id = create_session(
+                        st.session_state.user_id,
+                        industry,
+                        difficulty
+                    )
+                    st.session_state.session_id = session_id
 
                 with st.spinner("Preparing your interview..."):
                     first_q = get_next_question("Start the interview now.")
-                    if voice_enabled:
+                    if voice_enabled and VOICE_OUTPUT_AVAILABLE:
                         speak_question(first_q)
 
                 st.session_state.started = True
@@ -349,17 +382,19 @@ with tab1:
                 st.session_state.q_count = 1
                 st.rerun()
 
+        # Screen 2: Finished
         elif st.session_state.finished:
             st.success("✅ Interview Complete!")
             st.balloons()
             st.session_state.current_audio = None
 
             if st.session_state.scores and not st.session_state.scores_saved:
-                save_final_scores(
-                    st.session_state.session_id,
-                    st.session_state.scores
-                )
-                complete_session(st.session_state.session_id)
+                if DB_AVAILABLE and st.session_state.session_id:
+                    save_final_scores(
+                        st.session_state.session_id,
+                        st.session_state.scores
+                    )
+                    complete_session(st.session_state.session_id)
                 st.session_state.scores_saved = True
 
             st.subheader("📋 Interview Summary")
@@ -371,6 +406,7 @@ with tab1:
                     st.markdown(f"**Your answer:** {item['text']}")
                     q_num += 1
 
+        # Screen 3: In progress
         else:
             progress = st.session_state.q_count / MAX_QUESTIONS
             st.progress(
@@ -378,42 +414,46 @@ with tab1:
                 text=f"Question {st.session_state.q_count} of {MAX_QUESTIONS}"
             )
 
-            input_method = st.radio(
-                "Answer method:",
-                ["⌨️ Type", "🎤 Speak"],
-                horizontal=True,
-                key="input_method"
-            )
-
-            if input_method == "⌨️ Type":
+            if IS_CLOUD or not VOICE_INPUT_AVAILABLE:
+                # Cloud — typing only
                 user_input = st.chat_input("Type your answer and press Enter...")
                 if user_input:
                     process_answer(user_input)
-
             else:
-                duration = st.slider(
-                    "Recording duration (seconds)",
-                    min_value=5,
-                    max_value=30,
-                    value=10,
-                    key="rec_duration"
+                # Local — typing and voice
+                input_method = st.radio(
+                    "Answer method:",
+                    ["⌨️ Type", "🎤 Speak"],
+                    horizontal=True,
+                    key="input_method"
                 )
 
-                if st.button("🎤 Start Recording", type="primary"):
-                    with st.spinner(f"🔴 Recording for {duration} seconds... speak now!"):
-                        transcribed = record_answer(duration)
+                if input_method == "⌨️ Type":
+                    user_input = st.chat_input("Type your answer and press Enter...")
+                    if user_input:
+                        process_answer(user_input)
+                else:
+                    duration = st.slider(
+                        "Recording duration (seconds)",
+                        min_value=5,
+                        max_value=30,
+                        value=10,
+                        key="rec_duration"
+                    )
+                    if st.button("🎤 Start Recording", type="primary"):
+                        with st.spinner(f"🔴 Recording for {duration} seconds... speak now!"):
+                            transcribed = record_answer(duration)
+                        if transcribed and not transcribed.startswith("❌"):
+                            st.success(f"✅ You said: **{transcribed}**")
+                            st.session_state.voice_input = transcribed
+                            st.rerun()
+                        else:
+                            st.error(transcribed)
 
-                    if transcribed and not transcribed.startswith("❌"):
-                        st.success(f"✅ You said: **{transcribed}**")
-                        st.session_state.voice_input = transcribed
-                        st.rerun()
-                    else:
-                        st.error(transcribed)
-
-                if st.session_state.voice_input:
-                    user_input = st.session_state.voice_input
-                    st.session_state.voice_input = None
-                    process_answer(user_input)
+                    if st.session_state.voice_input:
+                        user_input = st.session_state.voice_input
+                        st.session_state.voice_input = None
+                        process_answer(user_input)
 
     # ── Score Dashboard ───────────────────────────────────
     with col2:
@@ -424,19 +464,14 @@ with tab1:
                     f"Answer {i+1} Scores",
                     expanded=(i == len(st.session_state.scores) - 1)
                 ):
-                    # Performance scores
                     st.metric("Clarity", f"{score.get('clarity', 5)}/10")
                     st.metric("Confidence", f"{score.get('confidence', 5)}/10")
                     st.metric("Relevance", f"{score.get('relevance', 5)}/10")
                     st.caption(f"💬 {score.get('feedback', '')}")
 
-                    # Emotion analysis
                     if score.get("emotion"):
                         st.divider()
                         emotion = score.get("emotion", "neutral")
-                        energy = score.get("energy", 5)
-                        nervousness = score.get("nervousness", 5)
-
                         emotion_emoji = {
                             "confident": "💪",
                             "nervous": "😰",
@@ -445,10 +480,9 @@ with tab1:
                             "calm": "😌",
                             "neutral": "😐"
                         }.get(emotion, "😐")
-
                         st.markdown(f"**Emotion:** {emotion_emoji} {emotion.title()}")
-                        st.metric("Energy", f"{energy}/10")
-                        st.metric("Nervousness", f"{nervousness}/10")
+                        st.metric("Energy", f"{score.get('energy', 5)}/10")
+                        st.metric("Nervousness", f"{score.get('nervousness', 5)}/10")
                         if score.get("suggestion"):
                             st.info(f"💡 {score.get('suggestion')}")
 
@@ -473,52 +507,56 @@ with tab1:
 # ════════════════════════════════════════════════════════
 with tab2:
     st.subheader(f"📊 {st.session_state.user_name}'s Interview History")
-    history = get_user_history(st.session_state.user_id)
 
-    if not history:
-        st.info("No interviews yet. Complete your first interview to see history!")
+    if not DB_AVAILABLE:
+        st.warning("Database not available in this environment.")
     else:
-        total = len(history)
-        completed = [h for h in history if h.get("session_scores")]
-        scores_list = [
-            h["session_scores"][0].get("overall_score", 0)
-            for h in completed if h.get("session_scores")
-        ]
-        avg_overall = sum(scores_list) / len(scores_list) if scores_list else 0
+        history = get_user_history(st.session_state.user_id)
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Sessions", total)
-        c2.metric("Completed", len(completed))
-        c3.metric("Avg Overall Score", f"{avg_overall:.1f}/10")
-        st.divider()
+        if not history:
+            st.info("No interviews yet. Complete your first interview to see history!")
+        else:
+            total = len(history)
+            completed = [h for h in history if h.get("session_scores")]
+            scores_list = [
+                h["session_scores"][0].get("overall_score", 0)
+                for h in completed if h.get("session_scores")
+            ]
+            avg_overall = sum(scores_list) / len(scores_list) if scores_list else 0
 
-        for session in history:
-            scores = session.get("session_scores", [])
-            score_data = scores[0] if scores else {}
-            overall = score_data.get("overall_score", "N/A")
-            date = session["created_at"][:10]
-            ind = session.get("industry", "General")
-            diff = session.get("difficulty", "Entry Level")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Sessions", total)
+            c2.metric("Completed", len(completed))
+            c3.metric("Avg Overall Score", f"{avg_overall:.1f}/10")
+            st.divider()
 
-            with st.expander(
-                f"📅 {date} | {ind} | {diff} | Score: {overall}/10"
-            ):
-                if score_data:
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Clarity", f"{score_data.get('avg_clarity', 0):.1f}/10")
-                    c2.metric("Confidence", f"{score_data.get('avg_confidence', 0):.1f}/10")
-                    c3.metric("Relevance", f"{score_data.get('avg_relevance', 0):.1f}/10")
+            for session in history:
+                scores = session.get("session_scores", [])
+                score_data = scores[0] if scores else {}
+                overall = score_data.get("overall_score", "N/A")
+                date = session["created_at"][:10]
+                ind = session.get("industry", "General")
+                diff = session.get("difficulty", "Entry Level")
 
-                qa_list = get_session_qa(session["id"])
-                if qa_list:
-                    st.divider()
-                    for qa in qa_list:
-                        st.markdown(f"**Q{qa['question_number']}:** {qa['question_text']}")
-                        st.markdown(f"**Answer:** {qa['answer_text']}")
+                with st.expander(
+                    f"📅 {date} | {ind} | {diff} | Score: {overall}/10"
+                ):
+                    if score_data:
                         c1, c2, c3 = st.columns(3)
-                        c1.metric("Clarity", qa.get("clarity_score", "-"))
-                        c2.metric("Confidence", qa.get("confidence_score", "-"))
-                        c3.metric("Relevance", qa.get("relevance_score", "-"))
-                        st.caption(f"💬 Feedback: {qa.get('feedback', '')}")
-                        st.caption(f"🎭 Emotion: {qa.get('emotion', 'neutral')}")
+                        c1.metric("Clarity", f"{score_data.get('avg_clarity', 0):.1f}/10")
+                        c2.metric("Confidence", f"{score_data.get('avg_confidence', 0):.1f}/10")
+                        c3.metric("Relevance", f"{score_data.get('avg_relevance', 0):.1f}/10")
+
+                    qa_list = get_session_qa(session["id"])
+                    if qa_list:
                         st.divider()
+                        for qa in qa_list:
+                            st.markdown(f"**Q{qa['question_number']}:** {qa['question_text']}")
+                            st.markdown(f"**Answer:** {qa['answer_text']}")
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Clarity", qa.get("clarity_score", "-"))
+                            c2.metric("Confidence", qa.get("confidence_score", "-"))
+                            c3.metric("Relevance", qa.get("relevance_score", "-"))
+                            st.caption(f"💬 {qa.get('feedback', '')}")
+                            st.caption(f"🎭 Emotion: {qa.get('emotion', 'neutral')}")
+                            st.divider()
