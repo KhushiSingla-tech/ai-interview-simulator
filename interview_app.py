@@ -5,14 +5,8 @@ import base64
 import json
 import os
 import tempfile
-import streamlit.components.v1 as components
 from openai import OpenAI
-
-try:
-    from elevenlabs.client import ElevenLabs
-    VOICE_OUTPUT_AVAILABLE = True
-except ImportError:
-    VOICE_OUTPUT_AVAILABLE = False
+import streamlit.components.v1 as components
 
 try:
     from database import (
@@ -26,6 +20,7 @@ except ImportError:
 # ── Configuration ───────────────────────────────────────
 N8N_BASE_URL = st.secrets.get("N8N_BASE_URL", "https://n8n-production-1cf5.up.railway.app/webhook")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+LEMONFOX_BASE_URL = "https://api.lemonfox.ai/v1"
 MAX_QUESTIONS = 5
 
 st.set_page_config(
@@ -47,8 +42,7 @@ for key, val in {
     "resume_text": "",
     "scores_saved": False,
     "current_audio": None,
-    "voice_input": None,
-    "recorded_audio": None
+    "voice_input": None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
@@ -77,66 +71,58 @@ if not st.session_state.user_id:
     st.stop()
 
 # ════════════════════════════════════════════════════════
-# VOICE OUTPUT — ElevenLabs TTS
+# VOICE OUTPUT — Lemonfox TTS
 # ════════════════════════════════════════════════════════
 def speak_question(text: str):
-    if not VOICE_OUTPUT_AVAILABLE:
-        return
     try:
-        client = ElevenLabs(
-            api_key=st.secrets.get("ELEVENLABS_KEY", "")
+        lemonfox_key = st.secrets.get("LEMONFOX_API_KEY", "")
+        response = requests.post(
+            f"{LEMONFOX_BASE_URL}/audio/speech",
+            headers={
+                "Authorization": f"Bearer {lemonfox_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "tts-1",
+                "input": text,
+                "voice": "alloy",
+                "response_format": "mp3"
+            },
+            timeout=30
         )
-        audio = client.text_to_speech.convert(
-            voice_id="pNInz6obpgDQGcFmaJgB",
-            text=text,
-            model_id="eleven_turbo_v2_5",
-            output_format="mp3_44100_128"
-        )
-        audio_bytes = b"".join(audio)
-        audio_b64 = base64.b64encode(audio_bytes).decode()
-        st.session_state.current_audio = audio_b64
+        if response.status_code == 200:
+            audio_b64 = base64.b64encode(response.content).decode()
+            st.session_state.current_audio = audio_b64
+        else:
+            st.warning(f"TTS error: {response.text}")
     except Exception as e:
         st.warning(f"Voice unavailable: {str(e)}")
 
 def display_audio():
     if st.session_state.current_audio:
-        # Auto-play using JavaScript
-        audio_b64 = st.session_state.current_audio
-        autoplay_html = f"""
-        <audio id="questionAudio" controls style="width:100%; margin:8px 0;">
-            <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
-        </audio>
-        <script>
-            // Auto-play with user gesture workaround
-            document.addEventListener('DOMContentLoaded', function() {{
-                var audio = document.getElementById('questionAudio');
-                if (audio) {{
-                    audio.play().catch(function(e) {{
-                        console.log('Autoplay blocked:', e);
-                    }});
-                }}
-            }});
-            // Try immediately too
-            var audio = document.getElementById('questionAudio');
-            if (audio) {{
-                audio.play().catch(function(e) {{
-                    console.log('Autoplay blocked:', e);
-                }});
-            }}
-        </script>
-        """
-        st.markdown("🔊 **Question Audio:**")
-        st.markdown(autoplay_html, unsafe_allow_html=True)
+        st.markdown("🔊 **Click play to hear the question:**")
+        st.markdown(
+            f'''<audio controls style="width:100%; margin:8px 0;">
+                <source src="data:audio/mp3;base64,{st.session_state.current_audio}"
+                type="audio/mp3">
+            </audio>''',
+            unsafe_allow_html=True
+        )
 
 # ════════════════════════════════════════════════════════
-# VOICE INPUT — Browser Recording + OpenAI Whisper API
+# VOICE INPUT — Lemonfox Whisper STT
 # ════════════════════════════════════════════════════════
-def transcribe_audio_whisper(audio_bytes: bytes) -> str:
+def transcribe_audio(audio_bytes: bytes) -> str:
     try:
-        client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
+        lemonfox_key = st.secrets.get("LEMONFOX_API_KEY", "")
+        client = OpenAI(
+            api_key=lemonfox_key,
+            base_url=LEMONFOX_BASE_URL
+        )
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(audio_bytes)
             temp_path = f.name
+
         with open(temp_path, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
@@ -147,133 +133,6 @@ def transcribe_audio_whisper(audio_bytes: bytes) -> str:
         return transcript.text.strip()
     except Exception as e:
         return f"❌ Transcription error: {str(e)}"
-
-def voice_recorder_component():
-    """Returns base64 encoded audio from browser recording"""
-    recorder_html = """
-    <div style="font-family: sans-serif; padding: 15px; background: #f8f9fa; 
-                border-radius: 12px; border: 1px solid #dee2e6;">
-        
-        <div id="status" style="margin-bottom: 12px; font-size: 14px; color: #495057; font-weight: 500;">
-            🎤 Click Start Recording and speak your answer
-        </div>
-        
-        <div style="display: flex; gap: 10px; margin-bottom: 12px;">
-            <button id="startBtn" onclick="startRecording()" style="
-                padding: 10px 20px; font-size: 14px; border: none;
-                border-radius: 8px; cursor: pointer; font-weight: 600;
-                background: #ff4b4b; color: white;">
-                🎤 Start Recording
-            </button>
-            <button id="stopBtn" onclick="stopRecording()" disabled style="
-                padding: 10px 20px; font-size: 14px; border: none;
-                border-radius: 8px; cursor: pointer; font-weight: 600;
-                background: #6c757d; color: white; opacity: 0.5;">
-                ⏹ Stop Recording
-            </button>
-        </div>
-
-        <div id="timer" style="display:none; color:#ff4b4b; font-weight:600; margin-bottom:8px;">
-            ⏱ Recording: <span id="seconds">0</span>s
-        </div>
-
-        <div id="audioPlayback" style="display:none; margin-bottom:12px;">
-            <p style="font-size:13px; color:#28a745; font-weight:600;">
-                ✅ Recording complete! Review below:
-            </p>
-            <audio id="playbackAudio" controls style="width:100%;"></audio>
-        </div>
-
-        <button id="submitBtn" onclick="submitAudio()" disabled style="
-            padding: 10px 24px; font-size: 14px; border: none;
-            border-radius: 8px; cursor: pointer; font-weight: 600;
-            background: #28a745; color: white; opacity: 0.5; width: 100%;">
-            ✅ Submit Recording for Transcription
-        </button>
-    </div>
-
-    <script>
-    let mediaRecorder;
-    let audioChunks = [];
-    let timerInterval;
-    let seconds = 0;
-    let audioBlob;
-
-    async function startRecording() {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            audioChunks = [];
-            seconds = 0;
-
-            mediaRecorder = new MediaRecorder(stream);
-            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-            mediaRecorder.onstop = async () => {
-                audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                const url = URL.createObjectURL(audioBlob);
-                document.getElementById('playbackAudio').src = url;
-                document.getElementById('audioPlayback').style.display = 'block';
-                document.getElementById('submitBtn').disabled = false;
-                document.getElementById('submitBtn').style.opacity = '1';
-                document.getElementById('status').textContent = '✅ Recording saved! Click Submit to transcribe.';
-                stream.getTracks().forEach(t => t.stop());
-            };
-
-            mediaRecorder.start();
-
-            // Update UI
-            document.getElementById('startBtn').disabled = true;
-            document.getElementById('startBtn').style.opacity = '0.5';
-            document.getElementById('stopBtn').disabled = false;
-            document.getElementById('stopBtn').style.opacity = '1';
-            document.getElementById('stopBtn').style.background = '#dc3545';
-            document.getElementById('timer').style.display = 'block';
-            document.getElementById('status').textContent = '🔴 Recording... speak your answer clearly';
-
-            timerInterval = setInterval(() => {
-                seconds++;
-                document.getElementById('seconds').textContent = seconds;
-            }, 1000);
-
-        } catch(err) {
-            document.getElementById('status').textContent = 
-                '❌ Microphone access denied. Please allow mic access and try again.';
-        }
-    }
-
-    function stopRecording() {
-        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-            mediaRecorder.stop();
-            clearInterval(timerInterval);
-            document.getElementById('startBtn').disabled = false;
-            document.getElementById('startBtn').style.opacity = '1';
-            document.getElementById('stopBtn').disabled = true;
-            document.getElementById('stopBtn').style.opacity = '0.5';
-            document.getElementById('timer').style.display = 'none';
-        }
-    }
-
-    async function submitAudio() {
-        if (!audioBlob) return;
-        
-        document.getElementById('status').textContent = '📤 Processing... please wait';
-        document.getElementById('submitBtn').disabled = true;
-        document.getElementById('submitBtn').textContent = '⏳ Processing...';
-
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const base64 = e.target.result.split(',')[1];
-            // Send to Streamlit
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: base64
-            }, '*');
-        };
-        reader.readAsDataURL(audioBlob);
-    }
-    </script>
-    """
-    result = components.html(recorder_html, height=280)
-    return result
 
 # ════════════════════════════════════════════════════════
 # EMOTION ANALYSIS — Groq LLM
@@ -312,7 +171,7 @@ def analyse_emotion(answer_text: str) -> dict:
             "emotion": "neutral",
             "energy": 5,
             "nervousness": 5,
-            "suggestion": "Keep practising to improve your communication!"
+            "suggestion": "Keep practising!"
         }
 
 # ── Sidebar ─────────────────────────────────────────────
@@ -347,13 +206,12 @@ with st.sidebar:
         for key in ["started", "history", "finished",
                     "q_count", "scores", "session_id",
                     "resume_text", "scores_saved",
-                    "current_audio", "voice_input", "recorded_audio"]:
+                    "current_audio", "voice_input"]:
             st.session_state[key] = (
                 [] if key in ["history", "scores"] else
                 False if key in ["started", "finished", "scores_saved"] else
                 0 if key == "q_count" else
-                None if key in ["current_audio", "voice_input", "recorded_audio"]
-                else ""
+                None if key in ["current_audio", "voice_input"] else ""
             )
         st.rerun()
 
@@ -384,7 +242,11 @@ def get_next_question(user_answer: str) -> str:
         "resume_text": st.session_state.resume_text[:1000]
     }
     try:
-        r = requests.post(f"{N8N_BASE_URL}/interview", json=payload, timeout=30)
+        r = requests.post(
+            f"{N8N_BASE_URL}/interview",
+            json=payload,
+            timeout=30
+        )
         r.raise_for_status()
         question = r.json().get("next_question", "Could not generate question.")
         return question.lstrip("= ").strip()
@@ -394,7 +256,11 @@ def get_next_question(user_answer: str) -> str:
 def get_score(question: str, answer: str) -> dict:
     payload = {"question": question, "answer": answer}
     try:
-        r = requests.post(f"{N8N_BASE_URL}/score", json=payload, timeout=30)
+        r = requests.post(
+            f"{N8N_BASE_URL}/score",
+            json=payload,
+            timeout=30
+        )
         r.raise_for_status()
         data = r.json()
         return {
@@ -415,7 +281,6 @@ def process_answer(user_input: str):
 
     if len(st.session_state.history) >= 2:
         last_q = st.session_state.history[-2]["text"]
-
         with st.spinner("Analysing your answer..."):
             score = get_score(last_q, user_input)
             emotion_data = analyse_emotion(user_input)
@@ -446,7 +311,7 @@ def process_answer(user_input: str):
     with st.spinner("Interviewer is thinking..."):
         next_q = get_next_question(user_input)
         if "interview is now complete" not in next_q.lower():
-            if voice_enabled and VOICE_OUTPUT_AVAILABLE:
+            if voice_enabled:
                 speak_question(next_q)
 
     if "interview is now complete" in next_q.lower():
@@ -493,7 +358,7 @@ with tab1:
 
                 with st.spinner("Preparing your interview..."):
                     first_q = get_next_question("Start the interview now.")
-                    if voice_enabled and VOICE_OUTPUT_AVAILABLE:
+                    if voice_enabled:
                         speak_question(first_q)
 
                 st.session_state.started = True
@@ -541,36 +406,35 @@ with tab1:
             )
 
             if input_method == "⌨️ Type":
-                user_input = st.chat_input("Type your answer and press Enter...")
+                user_input = st.chat_input(
+                    "Type your answer and press Enter..."
+                )
                 if user_input:
                     process_answer(user_input)
 
             else:
-                st.info("🎤 Use Chrome or Edge for best voice experience.")
+                st.info("🎤 Record your answer — works on Chrome, Edge, Safari")
 
-                # Show recorder component
-                audio_b64 = voice_recorder_component()
+                # Native Streamlit audio input
+                audio_input = st.audio_input(
+                    "Click microphone to record your answer"
+                )
 
-                # If audio received from component
-                if audio_b64 and isinstance(audio_b64, str) and len(audio_b64) > 100:
-                    if audio_b64 != st.session_state.get("recorded_audio"):
-                        st.session_state.recorded_audio = audio_b64
-                        with st.spinner("🔄 Transcribing your answer with Whisper..."):
-                            audio_bytes = base64.b64decode(audio_b64)
-                            transcribed = transcribe_audio_whisper(audio_bytes)
+                if audio_input is not None:
+                    st.audio(audio_input)
+                    if st.button(
+                        "✅ Transcribe and Submit",
+                        type="primary"
+                    ):
+                        with st.spinner("🔄 Transcribing with Whisper..."):
+                            audio_bytes = audio_input.read()
+                            transcribed = transcribe_audio(audio_bytes)
+
                         if transcribed and not transcribed.startswith("❌"):
                             st.success(f"✅ You said: **{transcribed}**")
-                            st.session_state.voice_input = transcribed
-                            st.rerun()
+                            process_answer(transcribed)
                         else:
                             st.error(transcribed)
-
-                # Process voice input
-                if st.session_state.voice_input:
-                    user_input = st.session_state.voice_input
-                    st.session_state.voice_input = None
-                    st.session_state.recorded_audio = None
-                    process_answer(user_input)
 
     # ── Score Dashboard ───────────────────────────────────
     with col2:
@@ -597,9 +461,14 @@ with tab1:
                             "calm": "😌",
                             "neutral": "😐"
                         }.get(emotion, "😐")
-                        st.markdown(f"**Emotion:** {emotion_emoji} {emotion.title()}")
+                        st.markdown(
+                            f"**Emotion:** {emotion_emoji} {emotion.title()}"
+                        )
                         st.metric("Energy", f"{score.get('energy', 5)}/10")
-                        st.metric("Nervousness", f"{score.get('nervousness', 5)}/10")
+                        st.metric(
+                            "Nervousness",
+                            f"{score.get('nervousness', 5)}/10"
+                        )
                         if score.get("suggestion"):
                             st.info(f"💡 {score.get('suggestion')}")
 
@@ -607,15 +476,15 @@ with tab1:
                 avg_c = sum(s.get("clarity", 5) for s in st.session_state.scores) / len(st.session_state.scores)
                 avg_conf = sum(s.get("confidence", 5) for s in st.session_state.scores) / len(st.session_state.scores)
                 avg_r = sum(s.get("relevance", 5) for s in st.session_state.scores) / len(st.session_state.scores)
-                avg_energy = sum(s.get("energy", 5) for s in st.session_state.scores) / len(st.session_state.scores)
-                avg_nerv = sum(s.get("nervousness", 5) for s in st.session_state.scores) / len(st.session_state.scores)
+                avg_e = sum(s.get("energy", 5) for s in st.session_state.scores) / len(st.session_state.scores)
+                avg_n = sum(s.get("nervousness", 5) for s in st.session_state.scores) / len(st.session_state.scores)
                 st.divider()
                 st.subheader("🏆 Final Scores")
                 st.metric("Avg Clarity", f"{avg_c:.1f}/10")
                 st.metric("Avg Confidence", f"{avg_conf:.1f}/10")
                 st.metric("Avg Relevance", f"{avg_r:.1f}/10")
-                st.metric("Avg Energy", f"{avg_energy:.1f}/10")
-                st.metric("Avg Nervousness", f"{avg_nerv:.1f}/10")
+                st.metric("Avg Energy", f"{avg_e:.1f}/10")
+                st.metric("Avg Nervousness", f"{avg_n:.1f}/10")
         else:
             st.info("Scores will appear here as you answer questions.")
 
@@ -631,7 +500,7 @@ with tab2:
         history = get_user_history(st.session_state.user_id)
 
         if not history:
-            st.info("No interviews yet. Complete your first interview to see history!")
+            st.info("No interviews yet. Complete your first interview!")
         else:
             total = len(history)
             completed = [h for h in history if h.get("session_scores")]
