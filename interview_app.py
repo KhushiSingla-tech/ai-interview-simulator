@@ -424,8 +424,6 @@ with tab1:
                     process_answer(user_input)
 
             else:
-                st.info("🎤 Record your answer — works on Chrome, Edge, Safari")
-
                 # Key changes every question — forces widget to reset
                 audio_key = f"audio_input_q{st.session_state.q_count}"
 
