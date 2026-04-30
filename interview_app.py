@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 from openai import OpenAI
-import streamlit.components.v1 as components
 
 try:
     from database import (
@@ -100,14 +99,26 @@ def speak_question(text: str):
 
 def display_audio():
     if st.session_state.current_audio:
-        st.markdown("🔊 **Click play to hear the question:**")
-        st.markdown(
-            f'''<audio controls style="width:100%; margin:8px 0;">
-                <source src="data:audio/mp3;base64,{st.session_state.current_audio}"
-                type="audio/mp3">
-            </audio>''',
-            unsafe_allow_html=True
-        )
+        audio_b64 = st.session_state.current_audio
+        autoplay_html = f"""
+        <audio id="qAudio" controls style="width:100%; margin:8px 0;">
+            <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
+        </audio>
+        <script>
+            (function() {{
+                var audio = document.getElementById('qAudio');
+                if (audio) {{
+                    audio.play().then(() => {{
+                        console.log('Autoplaying...');
+                    }}).catch((e) => {{
+                        console.log('Autoplay blocked:', e);
+                    }});
+                }}
+            }})();
+        </script>
+        """
+        st.markdown("🔊 **Question Audio** (auto-plays, or click ▶):")
+        st.markdown(autoplay_html, unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════
 # VOICE INPUT — Lemonfox Whisper STT
@@ -171,7 +182,7 @@ def analyse_emotion(answer_text: str) -> dict:
             "emotion": "neutral",
             "energy": 5,
             "nervousness": 5,
-            "suggestion": "Keep practising!"
+            "suggestion": "Keep practising to improve your communication!"
         }
 
 # ── Sidebar ─────────────────────────────────────────────
@@ -415,16 +426,20 @@ with tab1:
             else:
                 st.info("🎤 Record your answer — works on Chrome, Edge, Safari")
 
-                # Native Streamlit audio input
+                # Key changes every question — forces widget to reset
+                audio_key = f"audio_input_q{st.session_state.q_count}"
+
                 audio_input = st.audio_input(
-                    "Click microphone to record your answer"
+                    "Click microphone to record your answer",
+                    key=audio_key
                 )
 
                 if audio_input is not None:
                     st.audio(audio_input)
                     if st.button(
                         "✅ Transcribe and Submit",
-                        type="primary"
+                        type="primary",
+                        key=f"submit_q{st.session_state.q_count}"
                     ):
                         with st.spinner("🔄 Transcribing with Whisper..."):
                             audio_bytes = audio_input.read()
@@ -434,7 +449,7 @@ with tab1:
                             st.success(f"✅ You said: **{transcribed}**")
                             process_answer(transcribed)
                         else:
-                            st.error(transcribed)
+                            st.error(f"Could not transcribe: {transcribed}")
 
     # ── Score Dashboard ───────────────────────────────────
     with col2:
