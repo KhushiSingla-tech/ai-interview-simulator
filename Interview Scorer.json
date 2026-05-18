@@ -1,0 +1,125 @@
+{
+  "name": "Interview Scorer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "score",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "15c7caab-a492-4193-9546-7d124625088a",
+      "name": "Webhook",
+      "webhookId": "a3689100-b065-48ed-92f9-8677590334c5"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"max_tokens\": 200,\n  \"temperature\": 0.3,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert interview coach. Evaluate the candidate answer. Respond with ONLY a valid JSON object, no extra text: {\\\"clarity\\\": 7, \\\"confidence\\\": 6, \\\"relevance\\\": 8, \\\"feedback\\\": \\\"one sentence feedback here\\\"} All scores are integers 1-10.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"={{ 'Question: ' + $json.body.question.replace(/[\\n\\r]/g, ' ') + ' | Answer: ' + $json.body.answer.replace(/[\\n\\r]/g, ' ') }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "fca9c654-4789-49a1-acd3-83e045d34e9d",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "XsVjuxm9dsnBMjp9",
+          "name": "Bearer Auth account"
+        },
+        "httpHeaderAuth": {
+          "id": "LH6ylHzR5zaN88bx",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices[0].message.content.trim();\n\nconst cleaned = raw.replace(/```json|```/g, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch(e) {\n  parsed = {\n    clarity: 5,\n    confidence: 5,\n    relevance: 5,\n    feedback: \"Could not parse score. Please try again.\"\n  };\n}\n\nreturn [{\n  json: {\n    clarity: parseInt(parsed.clarity) || 5,\n    confidence: parseInt(parsed.confidence) || 5,\n    relevance: parseInt(parsed.relevance) || 5,\n    feedback: String(parsed.feedback) || \"No feedback available.\"\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "c65e4a69-e65b-4e00-8fcc-658b223230dc",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        624,
+        0
+      ],
+      "id": "4216187e-3bfb-4aa6-85a8-bc78eaeed7b1",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "e558c135-0cb8-4c40-8c1e-c3f4fe1439e7",
+  "meta": {
+    "instanceId": "29818a999b715d85797433dfca503e513ad02534f7ff94c9522de8c575faeab9"
+  },
+  "id": "h4sdixjKwvRUgo8B",
+  "tags": []
+}

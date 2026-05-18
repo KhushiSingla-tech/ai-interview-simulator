@@ -1,0 +1,123 @@
+{
+  "name": "AI Interview Simulator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "interview",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        176,
+        0
+      ],
+      "id": "71d738f5-8770-4caa-a5be-21dba884dcd2",
+      "name": "Webhook",
+      "webhookId": "e0da7a5a-9ea3-4e35-bd8d-286f8075e703"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"llama-3.1-8b-instant\",\n  \"max_tokens\": 150,\n  \"temperature\": 0.7,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a strict professional job interviewer. Follow these rules without exception:1. Ask ONLY ONE question per response. Never ask two questions.2. Keep every question under 20 words.3. After exactly 5 questions say only: Thank you, the interview is now complete.4. Never repeat a question already asked in the conversation history.5. Never give feedback, encouragement, or commentary. Only ask questions.6. Do not use any placeholders, brackets, or variables like [industry], [company], [position], [field], or [sector] in your questions. Always write the full question directly.7. Do not start your response with labels like Interviewer: or Q: Just ask the question directly.8. Adapt questions based on the industry, difficulty level, and candidate resume provided.9. Ask natural, specific, real interview questions as a human interviewer would.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"={{ 'Industry: ' + $json.body.industry + '\\\\nDifficulty: ' + $json.body.difficulty + '\\\\nResume: ' + ($json.body.resume_text || 'Not provided') + '\\\\nQuestions asked: ' + $json.body.question_count + '/5\\\\n\\\\nConversation:\\\\n' + ($json.body.history || 'No history yet') + '\\\\n\\\\nCandidate said: ' + $json.body.user_answer + '\\\\n\\\\nAsk the next interview question:' }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        416,
+        0
+      ],
+      "id": "04380a7b-18f2-4c4b-92ef-c2089fdbf811",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "L4nZ9i3jzt355k9W",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"next_question\": \"={{ $json.next_question }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        832,
+        0
+      ],
+      "id": "cdb7665f-c2f7-4cec-b382-e228aeb76dc7",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices[0].message.content.trim();\n\n// Remove any leading = or labels like \"Interviewer:\"\nconst cleaned = raw\n  .replace(/^=+/, '')\n  .replace(/^\\$json\\.\\S+/g, '')\n  .replace(/^Interviewer:\\s*/i, '')\n  .trim();\n\nreturn [{\n  json: {\n    next_question: cleaned\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "id": "105e3b52-8b62-4100-bbd0-19b7537f2604",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "1186998a-2af8-4d04-8b52-ae61ab27bb9d",
+  "meta": {
+    "instanceId": "29818a999b715d85797433dfca503e513ad02534f7ff94c9522de8c575faeab9"
+  },
+  "id": "jXExef8E3lYiY1dD",
+  "tags": []
+}
